@@ -1,0 +1,9 @@
+{
+  "name": "statistika-hasici-stc",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "api:dev": "npm --prefix apps/api run dev",
+    "api:start": "npm --prefix apps/api run start"
+  }
+}
