@@ -20,8 +20,8 @@ app.get("/health", (_req, res) => {
 
 /**
  * Ingest RSS -> SQLite
- * - GET  /ingest  (pohodlné pro test v prohlížeči)
- * - POST /ingest  (stejné, vhodné pro cron / job)
+ * - GET  /ingest  (test v prohlížeči)
+ * - POST /ingest  (pro cron / job)
  */
 async function handleIngest(_req, res) {
   try {
@@ -39,10 +39,12 @@ app.get("/ingest", handleIngest);
 app.post("/ingest", handleIngest);
 
 // --- STATS ---
+// Pozn.: stmts.statsXxx() interně pravděpodobně destructuruje {from, to}.
+// Proto vždy posíláme aspoň {} aby to nikdy nespadlo na undefined.
 
 app.get("/stats/places", async (_req, res) => {
   try {
-    const rows = await stmts.statsPlaces();
+    const rows = await stmts.statsPlaces({});
     res.json({ ok: true, data: rows });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
@@ -51,7 +53,7 @@ app.get("/stats/places", async (_req, res) => {
 
 app.get("/stats/categories", async (_req, res) => {
   try {
-    const rows = await stmts.statsCategories();
+    const rows = await stmts.statsCategories({});
     res.json({ ok: true, data: rows });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
@@ -60,7 +62,7 @@ app.get("/stats/categories", async (_req, res) => {
 
 app.get("/stats/districts", async (_req, res) => {
   try {
-    const rows = await stmts.statsDistricts();
+    const rows = await stmts.statsDistricts({});
     res.json({ ok: true, data: rows });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
