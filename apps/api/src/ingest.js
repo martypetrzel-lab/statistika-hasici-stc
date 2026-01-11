@@ -1,134 +1,132 @@
-import { fetchText, parseRssXml } from "./rss.js";
+// apps/api/src/ingest.js
+import { parseRss } from "./rss.js";
+import { stmts } from "./db.js";
+import { geocodePlace } from "./geocode.js";
 
-export async function ingestFromRss(db, sourceUrl) {
-  const startedAt = new Date().toISOString();
+function parseEndedAt(text) {
+  if (!text) return null;
+  return text.trim();
+}
 
-  const xml = await fetchText(sourceUrl);
-  const items = await parseRssXml(xml);
+function htmlBrToLines(html) {
+  return String(html || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .trim();
+}
 
-  let inserted = 0;
-  let updated = 0;
-  let skipped = 0;
+function parseDescription(descHtml) {
+  const lines = htmlBrToLines(descHtml)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
 
-  for (const it of items) {
-    if (!it.incident_id || !it.pub_date || !it.title || !it.link) {
-      skipped++;
-      continue;
-    }
+  let status = null;
+  let ended_at = null;
+  let place = null;
+  let district = null;
 
-    const existing = await db.get(
-      `SELECT incident_id, title, link, guid, pub_date, category, subtype, place, district, status, end_time, road, km, raw_description
-       FROM incidents
-       WHERE incident_id = ?`,
-      [it.incident_id]
-    );
-
-    const now = new Date().toISOString();
-
-    if (!existing) {
-      await db.run(
-        `INSERT INTO incidents (
-          incident_id, title, link, guid, pub_date,
-          category, subtype, place, district, status,
-          end_time, road, km, raw_description, ingested_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          it.incident_id,
-          it.title,
-          it.link,
-          it.guid,
-          it.pub_date,
-          it.category,
-          it.subtype,
-          it.place,
-          it.district,
-          it.status,
-          it.end_time,
-          it.road,
-          it.km,
-          it.raw_description,
-          now
-        ]
-      );
-      inserted++;
-      continue;
-    }
-
-    // update jen když se něco změnilo (reálná data, žádné odhady)
-    const changed =
-      existing.title !== it.title ||
-      existing.link !== it.link ||
-      existing.guid !== it.guid ||
-      existing.pub_date !== it.pub_date ||
-      existing.category !== it.category ||
-      existing.subtype !== it.subtype ||
-      existing.place !== it.place ||
-      existing.district !== it.district ||
-      existing.status !== it.status ||
-      existing.end_time !== it.end_time ||
-      existing.road !== it.road ||
-      Number(existing.km ?? null) !== Number(it.km ?? null) ||
-      existing.raw_description !== it.raw_description;
-
-    if (!changed) {
-      skipped++;
-      continue;
-    }
-
-    await db.run(
-      `UPDATE incidents SET
-        title = ?, link = ?, guid = ?, pub_date = ?,
-        category = ?, subtype = ?, place = ?, district = ?, status = ?,
-        end_time = ?, road = ?, km = ?, raw_description = ?, ingested_at = ?
-      WHERE incident_id = ?`,
-      [
-        it.title,
-        it.link,
-        it.guid,
-        it.pub_date,
-        it.category,
-        it.subtype,
-        it.place,
-        it.district,
-        it.status,
-        it.end_time,
-        it.road,
-        it.km,
-        it.raw_description,
-        now,
-        it.incident_id
-      ]
-    );
-    updated++;
+  for (const l of lines) {
+    if (l.toLowerCase().startsWith("stav:")) status = l.split(":").slice(1).join(":").trim();
+    else if (l.toLowerCase().startsWith("ukončení:"))
+      ended_at = parseEndedAt(l.split(":").slice(1).join(":"));
+    else if (l.toLowerCase().startsWith("okres"))
+      district = l.replace(/^okres\s+/i, "").trim();
   }
 
-  const finishedAt = new Date().toISOString();
-
-  await db.run(
-    `INSERT INTO ingest_runs (
-      source_url, started_at, finished_at,
-      items_total, items_inserted, items_updated, items_skipped,
-      note
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      sourceUrl,
-      startedAt,
-      finishedAt,
-      items.length,
-      inserted,
-      updated,
-      skipped,
-      null
-    ]
+  const candidatePlaces = lines.filter(
+    (l) =>
+      !/^stav:/i.test(l) &&
+      !/^ukončení:/i.test(l) &&
+      !/^km:/i.test(l) &&
+      !/^okres/i.test(l) &&
+      !/^D\d+/i.test(l)
   );
+  if (candidatePlaces.length > 0) {
+    place = candidatePlaces[candidatePlaces.length - 1].trim();
+  }
+
+  return { status, ended_at, place, district, raw_description: lines.join(" | ") };
+}
+
+function parseTitle(title) {
+  const parts = String(title || "")
+    .split(" - ")
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const category = parts[0] || null;
+  const subtype = parts.length >= 3 ? parts.slice(1, -1).join(" - ") : (parts[1] || null);
+  return { category, subtype };
+}
+
+// For now keep duration null; we will normalize ended_at to ISO and compute later
+function computeDurationMinutes(_pubDateIso, _endedAtIso) {
+  return null;
+}
+
+async function ensurePlaceCoords(place, district) {
+  if (!place) return;
+
+  const existing = await stmts.getPlace({ place, district: district || null });
+  if (existing && existing.lat != null && existing.lon != null) return;
+
+  const geo = await geocodePlace(place);
+  if (!geo) return;
+
+  await stmts.upsertPlaceCoords({
+    place,
+    district: district || null,
+    lat: geo.lat,
+    lon: geo.lon,
+    provider: geo.provider,
+  });
+}
+
+export async function ingestOnce() {
+  const rssUrl = process.env.RSS_URL;
+  if (!rssUrl) throw new Error("RSS_URL is not set");
+
+  const feed = await parseRss(rssUrl);
+
+  let upserted = 0;
+
+  for (const it of feed.items) {
+    const { category, subtype } = parseTitle(it.title);
+    const parsed = parseDescription(it.description);
+
+    const pub_date = it.pubDateIso;
+    const duration_minutes = computeDurationMinutes(pub_date, parsed.ended_at);
+
+    await stmts.upsertIncident({
+      guid: it.guid,
+      title: it.title,
+      link: it.link,
+      pub_date,
+      category,
+      subtype,
+      place: parsed.place,
+      district: parsed.district,
+      status: parsed.status,
+      ended_at: parsed.ended_at,
+      duration_minutes,
+      raw_description: parsed.raw_description,
+    });
+
+    upserted++;
+  }
+
+  const missing = await stmts.placesMissingCoords({ limit: 5 });
+  for (const row of missing) {
+    await ensurePlaceCoords(row.place, row.district);
+  }
 
   return {
-    source_url: sourceUrl,
-    started_at: startedAt,
-    finished_at: finishedAt,
-    items_total: items.length,
-    items_inserted: inserted,
-    items_updated: updated,
-    items_skipped: skipped
+    ok: true,
+    fetched: feed.items.length,
+    upserted,
+    geocoded_attempts: missing.length,
   };
 }
