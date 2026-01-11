@@ -1,69 +1,75 @@
 // apps/api/src/server.js
+import "dotenv/config";
 import express from "express";
-import cors from "cors";
+
 import { ingestOnce } from "./ingest.js";
-import { stmts, getDbInfo, initDb } from "./db.js";
+import { stmts } from "./db.js";
 
 const app = express();
 app.use(express.json());
 
-const corsOrigin = process.env.CORS_ORIGIN || "*";
-app.use(cors({ origin: corsOrigin === "*" ? true : corsOrigin }));
+const PORT = Number(process.env.PORT || 8787);
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "hasici-stc-api", time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    service: "hasici-stc-api",
+    time: new Date().toISOString(),
+  });
 });
 
-app.get("/debug/db", (_req, res) => {
-  res.json(getDbInfo());
-});
-
-app.post("/ingest", async (_req, res) => {
+/**
+ * Ingest RSS -> SQLite
+ * - GET  /ingest  (pohodlné pro test v prohlížeči)
+ * - POST /ingest  (stejné, vhodné pro cron / job)
+ */
+async function handleIngest(_req, res) {
   try {
-    const out = await ingestOnce();
-    res.json(out);
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    const result = await ingestOnce();
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: String(err?.message || err),
+    });
+  }
+}
+
+app.get("/ingest", handleIngest);
+app.post("/ingest", handleIngest);
+
+// --- STATS ---
+
+app.get("/stats/places", async (_req, res) => {
+  try {
+    const rows = await stmts.statsPlaces();
+    res.json({ ok: true, data: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
-app.get("/incidents", async (req, res) => {
-  const limit = Math.min(Number(req.query.limit || 50), 200);
-  const offset = Math.max(Number(req.query.offset || 0), 0);
-
-  const from = req.query.from ? String(req.query.from) : null;
-  const to = req.query.to ? String(req.query.to) : null;
-
-  const rows = await stmts.listIncidents({ from, to, limit, offset });
-  res.json({ ok: true, limit, offset, count: rows.length, data: rows });
+app.get("/stats/categories", async (_req, res) => {
+  try {
+    const rows = await stmts.statsCategories();
+    res.json({ ok: true, data: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
 });
 
-app.get("/stats/places", async (req, res) => {
-  const from = req.query.from ? String(req.query.from) : null;
-  const to = req.query.to ? String(req.query.to) : null;
-
-  const rows = await stmts.statsPlaces({ from, to });
-  const data = rows.map((r) => ({
-    place: r.place,
-    district: r.district,
-    count: Number(r.count || 0),
-    total_minutes: Number(r.total_minutes || 0),
-    total_hours: Math.round((Number(r.total_minutes || 0) / 60) * 100) / 100,
-    lat: r.lat == null ? null : Number(r.lat),
-    lon: r.lon == null ? null : Number(r.lon),
-  }));
-
-  res.json({ ok: true, data });
+app.get("/stats/districts", async (_req, res) => {
+  try {
+    const rows = await stmts.statsDistricts();
+    res.json({ ok: true, data: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
 });
 
-const port = Number(process.env.PORT || 8787);
-
-async function start() {
-  await initDb();
-  app.listen(port, () => console.log(`[api] listening on :${port}`));
-}
-
-start().catch((e) => {
-  console.error("[api] failed to start:", e);
-  process.exit(1);
+app.listen(PORT, () => {
+  console.log(`[api] listening on :${PORT}`);
+  if (!process.env.RSS_URL) {
+    console.log("[api] WARNING: RSS_URL is not set (ingest will fail until you set it).");
+  }
 });
