@@ -18,11 +18,6 @@ app.get("/health", (_req, res) => {
   });
 });
 
-/**
- * Ingest RSS -> SQLite
- * - GET  /ingest  (test v prohlížeči)
- * - POST /ingest  (pro cron / job)
- */
 async function handleIngest(_req, res) {
   try {
     const result = await ingestOnce();
@@ -39,9 +34,6 @@ app.get("/ingest", handleIngest);
 app.post("/ingest", handleIngest);
 
 // --- STATS ---
-// Pozn.: stmts.statsXxx() interně pravděpodobně destructuruje {from, to}.
-// Proto vždy posíláme aspoň {} aby to nikdy nespadlo na undefined.
-
 app.get("/stats/places", async (_req, res) => {
   try {
     const rows = await stmts.statsPlaces({});
@@ -63,6 +55,16 @@ app.get("/stats/categories", async (_req, res) => {
 app.get("/stats/districts", async (_req, res) => {
   try {
     const rows = await stmts.statsDistricts({});
+    res.json({ ok: true, data: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// --- MAP ---
+app.get("/map/places", async (_req, res) => {
+  try {
+    const rows = await stmts.mapPlaces({});
     res.json({ ok: true, data: rows });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
