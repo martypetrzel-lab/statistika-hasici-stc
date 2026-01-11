@@ -44,6 +44,7 @@ function parseDescription(descHtml) {
       !/^okres/i.test(l) &&
       !/^D\d+/i.test(l)
   );
+
   if (candidatePlaces.length > 0) {
     place = candidatePlaces[candidatePlaces.length - 1].trim();
   }
@@ -62,8 +63,8 @@ function parseTitle(title) {
   return { category, subtype };
 }
 
-// For now keep duration null; we will normalize ended_at to ISO and compute later
-function computeDurationMinutes(_pubDateIso, _endedAtIso) {
+// zatím necháváme null, dokud nebudeme mít jednotný formát ended_at
+function computeDurationMinutes(_pubDateIso, _endedAtText) {
   return null;
 }
 
