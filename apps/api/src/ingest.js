@@ -2,18 +2,17 @@ import { parseRss } from "./rss.js";
 import { upsertIncidents, countGeocodedAttempts } from "./db.js";
 
 function buildCandidates(feedUrl) {
-  // 1) vždy zkusit původní URL
+  // 1) origin
   const candidates = [feedUrl];
 
-  // 2) pokud je http://, zkusit HTTPS proxy varianty
-  if (feedUrl.startsWith("http://")) {
-    candidates.push(
-      "https://api.allorigins.win/raw?url=" + encodeURIComponent(feedUrl)
-    );
-    candidates.push(
-      "https://r.jina.ai/" + feedUrl
-    );
-  }
+  // 2) HTTPS proxy (funguje pro http i https)
+  candidates.push(
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(feedUrl)
+  );
+
+  // 3) jina.ai proxy (funguje pro http i https)
+  //    (jina.ai očekává URL za lomítkem)
+  candidates.push("https://r.jina.ai/" + feedUrl);
 
   return candidates;
 }
@@ -23,11 +22,7 @@ async function fetchWithTimeout(url, { timeoutMs = 15000, headers = {} } = {}) {
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
 
   try {
-    const r = await fetch(url, {
-      signal: ctrl.signal,
-      headers
-    });
-    return r;
+    return await fetch(url, { signal: ctrl.signal, headers });
   } finally {
     clearTimeout(t);
   }
@@ -48,7 +43,6 @@ export async function ingestOnce({ feedUrl }) {
   let response = null;
   let usedUrl = null;
 
-  // postupně zkoušíme URL varianty
   for (const url of candidates) {
     try {
       const r = await fetchWithTimeout(url, { timeoutMs: 15000, headers });
@@ -67,9 +61,7 @@ export async function ingestOnce({ feedUrl }) {
     }
   }
 
-  if (!response) {
-    throw lastErr || new Error("FEED fetch failed: unknown error");
-  }
+  if (!response) throw lastErr || new Error("FEED fetch failed: unknown error");
 
   const xml = await response.text();
   const items = await parseRss(xml);
@@ -90,6 +82,6 @@ export async function ingestOnce({ feedUrl }) {
     fetched: normalized.length,
     upserted,
     geocoded_attempts: Math.max(0, after - before),
-    source: usedUrl // pro debug do logu / UI, ať víš přes co to šlo
+    source: usedUrl
   };
 }
