@@ -2,22 +2,21 @@ import { parseRss } from "./rss.js";
 import { upsertIncidents, countGeocodedAttempts } from "./db.js";
 
 function buildCandidates(feedUrl) {
-  // 1) origin
-  const candidates = [feedUrl];
-
-  // 2) HTTPS proxy (funguje pro http i https)
-  candidates.push(
-    "https://api.allorigins.win/raw?url=" + encodeURIComponent(feedUrl)
-  );
-
-  // 3) jina.ai proxy (funguje pro http i https)
-  //    (jina.ai očekává URL za lomítkem)
-  candidates.push("https://r.jina.ai/" + feedUrl);
-
-  return candidates;
+  // Dáme proxy první (Railway často narazí na TLS/latenci u originu)
+  return [
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(feedUrl),
+    "https://r.jina.ai/" + feedUrl,
+    feedUrl
+  ];
 }
 
-async function fetchWithTimeout(url, { timeoutMs = 15000, headers = {} } = {}) {
+function getTimeoutMs() {
+  // lze přenastavit v Railway Variables: INGEST_FETCH_TIMEOUT_MS=60000
+  const v = Number(process.env.INGEST_FETCH_TIMEOUT_MS || 45000);
+  return Number.isFinite(v) && v > 0 ? v : 45000;
+}
+
+async function fetchWithTimeout(url, { timeoutMs, headers }) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
 
@@ -37,31 +36,42 @@ export async function ingestOnce({ feedUrl }) {
     accept: "application/rss+xml, application/xml, text/xml, */*"
   };
 
+  const timeoutMs = getTimeoutMs();
   const candidates = buildCandidates(feedUrl);
 
-  let lastErr = null;
   let response = null;
   let usedUrl = null;
+  const errors = [];
 
   for (const url of candidates) {
     try {
-      const r = await fetchWithTimeout(url, { timeoutMs: 15000, headers });
+      console.log(`[ingest] fetch try ${url} (timeout ${timeoutMs}ms)`);
+      const r = await fetchWithTimeout(url, { timeoutMs, headers });
 
       if (!r.ok) {
-        lastErr = new Error(`FEED fetch failed: Status code ${r.status} (${url})`);
+        const err = `Status code ${r.status}`;
+        errors.push({ url, err });
+        console.log(`[ingest] fetch bad ${url}: ${err}`);
         continue;
       }
 
       response = r;
       usedUrl = url;
+      console.log(`[ingest] fetch ok ${url}`);
       break;
     } catch (e) {
-      lastErr = new Error(`FEED fetch failed: ${e?.message || String(e)} (${url})`);
+      const msg = e?.message || String(e);
+      errors.push({ url, err: msg });
+      console.log(`[ingest] fetch fail ${url}: ${msg}`);
       continue;
     }
   }
 
-  if (!response) throw lastErr || new Error("FEED fetch failed: unknown error");
+  if (!response) {
+    // vypíšeme souhrn – výrazně pomůže debug
+    const summary = errors.map((x) => `${x.url} => ${x.err}`).join(" | ");
+    throw new Error(`FEED fetch failed: ${summary}`);
+  }
 
   const xml = await response.text();
   const items = await parseRss(xml);
