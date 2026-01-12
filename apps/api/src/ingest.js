@@ -1,13 +1,9 @@
-import { Agent } from "undici";
+import https from "node:https";
+import http from "node:http";
+import { URL } from "node:url";
+
 import { parseRss } from "./rss.js";
 import { upsertIncidents, countGeocodedAttempts } from "./db.js";
-
-// Insecure TLS agent – POUZE pro konkrétní host (rozbitý TLS řetězec / cert chain).
-const insecureAgent = new Agent({
-  connect: {
-    rejectUnauthorized: false
-  }
-});
 
 function getTimeoutMs() {
   const v = Number(process.env.INGEST_FETCH_TIMEOUT_MS || 60000);
@@ -15,11 +11,14 @@ function getTimeoutMs() {
 }
 
 function buildCandidates(feedUrl) {
-  // Zkusíme origin, pak proxy (nechávám pro případ, že se časem chytí).
+  // origin nejdřív (s naším https klientem), pak proxy
   return [
-    feedUrl,
-    "https://api.allorigins.win/raw?url=" + encodeURIComponent(feedUrl),
-    "https://r.jina.ai/" + feedUrl
+    { url: feedUrl, mode: "native" },
+    {
+      url: "https://api.allorigins.win/raw?url=" + encodeURIComponent(feedUrl),
+      mode: "fetch"
+    },
+    { url: "https://r.jina.ai/" + feedUrl, mode: "fetch" }
   ];
 }
 
@@ -32,22 +31,78 @@ function shouldUseInsecureTls(url) {
   }
 }
 
-async function fetchWithTimeout(url, { timeoutMs, headers }) {
+async function fetchTextNative(url, { timeoutMs }) {
+  const u = new URL(url);
+  const isHttps = u.protocol === "https:";
+  const lib = isHttps ? https : http;
+
+  const insecure = isHttps && shouldUseInsecureTls(url);
+
+  const options = {
+    method: "GET",
+    headers: {
+      "user-agent":
+        "statistika-hasici-stc/1.0 (+https://github.com/martypetrzel-lab/statistika-hasici-stc)",
+      accept: "application/rss+xml, application/xml, text/xml, */*"
+    },
+    // jen pro tenhle konkrétní host s rozbitým TLS
+    ...(insecure ? { rejectUnauthorized: false } : {})
+  };
+
+  return await new Promise((resolve, reject) => {
+    const req = lib.request(u, options, (res) => {
+      // redirecty
+      if (
+        res.statusCode &&
+        res.statusCode >= 300 &&
+        res.statusCode < 400 &&
+        res.headers.location
+      ) {
+        const next = new URL(res.headers.location, u).toString();
+        res.resume();
+        fetchTextNative(next, { timeoutMs }).then(resolve).catch(reject);
+        return;
+      }
+
+      if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+        const status = res.statusCode || 0;
+        res.resume();
+        reject(new Error(`Status code ${status}`));
+        return;
+      }
+
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => resolve(data));
+    });
+
+    req.on("error", reject);
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error("Timeout"));
+    });
+
+    req.end();
+  });
+}
+
+async function fetchTextViaFetch(url, { timeoutMs }) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
 
   try {
-    const opts = {
+    const r = await fetch(url, {
       signal: ctrl.signal,
-      headers
-    };
+      headers: {
+        "user-agent":
+          "statistika-hasici-stc/1.0 (+https://github.com/martypetrzel-lab/statistika-hasici-stc)",
+        accept: "application/rss+xml, application/xml, text/xml, */*"
+      }
+    });
 
-    // Pouze pro origin host použijeme insecure TLS (jinak normální fetch).
-    if (shouldUseInsecureTls(url)) {
-      opts.dispatcher = insecureAgent;
-    }
-
-    return await fetch(url, opts);
+    if (!r.ok) throw new Error(`Status code ${r.status}`);
+    return await r.text();
   } finally {
     clearTimeout(t);
   }
@@ -56,32 +111,24 @@ async function fetchWithTimeout(url, { timeoutMs, headers }) {
 export async function ingestOnce({ feedUrl }) {
   if (!feedUrl) throw new Error("Missing feedUrl");
 
-  const headers = {
-    "user-agent":
-      "statistika-hasici-stc/1.0 (+https://github.com/martypetrzel-lab/statistika-hasici-stc)",
-    accept: "application/rss+xml, application/xml, text/xml, */*"
-  };
-
   const timeoutMs = getTimeoutMs();
   const candidates = buildCandidates(feedUrl);
 
-  let response = null;
-  let usedUrl = null;
   const errors = [];
+  let xml = null;
+  let usedUrl = null;
 
-  for (const url of candidates) {
+  for (const c of candidates) {
+    const { url, mode } = c;
     try {
-      console.log(`[ingest] fetch try ${url} (timeout ${timeoutMs}ms)`);
-      const r = await fetchWithTimeout(url, { timeoutMs, headers });
+      console.log(`[ingest] fetch try ${url} (${mode}) (timeout ${timeoutMs}ms)`);
 
-      if (!r.ok) {
-        const err = `Status code ${r.status}`;
-        errors.push({ url, err });
-        console.log(`[ingest] fetch bad ${url}: ${err}`);
-        continue;
+      if (mode === "native") {
+        xml = await fetchTextNative(url, { timeoutMs });
+      } else {
+        xml = await fetchTextViaFetch(url, { timeoutMs });
       }
 
-      response = r;
       usedUrl = url;
       console.log(`[ingest] fetch ok ${url}`);
       break;
@@ -89,16 +136,14 @@ export async function ingestOnce({ feedUrl }) {
       const msg = e?.message || String(e);
       errors.push({ url, err: msg });
       console.log(`[ingest] fetch fail ${url}: ${msg}`);
-      continue;
     }
   }
 
-  if (!response) {
+  if (!xml) {
     const summary = errors.map((x) => `${x.url} => ${x.err}`).join(" | ");
     throw new Error(`FEED fetch failed: ${summary}`);
   }
 
-  const xml = await response.text();
   const items = await parseRss(xml);
 
   const normalized = items.map((it) => ({
