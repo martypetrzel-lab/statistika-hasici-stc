@@ -11,7 +11,6 @@ function getTimeoutMs() {
 }
 
 function buildCandidates(feedUrl) {
-  // origin nejdřív (s naším https klientem), pak proxy
   return [
     { url: feedUrl, mode: "native" },
     {
@@ -31,6 +30,21 @@ function shouldUseInsecureTls(url) {
   }
 }
 
+function formatErr(e) {
+  if (!e) return "unknown error";
+  // AggregateError často obsahuje .errors (pole)
+  if (e instanceof AggregateError && Array.isArray(e.errors)) {
+    const parts = e.errors.map((x) => {
+      const code = x?.code ? `${x.code}` : "";
+      const msg = x?.message ? x.message : String(x);
+      return code ? `${code}: ${msg}` : msg;
+    });
+    return `AggregateError(${parts.join(" | ")})`;
+  }
+  const code = e.code ? `${e.code}: ` : "";
+  return code + (e.message || String(e));
+}
+
 async function fetchTextNative(url, { timeoutMs }) {
   const u = new URL(url);
   const isHttps = u.protocol === "https:";
@@ -45,8 +59,12 @@ async function fetchTextNative(url, { timeoutMs }) {
         "statistika-hasici-stc/1.0 (+https://github.com/martypetrzel-lab/statistika-hasici-stc)",
       accept: "application/rss+xml, application/xml, text/xml, */*"
     },
-    // jen pro tenhle konkrétní host s rozbitým TLS
-    ...(insecure ? { rejectUnauthorized: false } : {})
+
+    // Jen pro tenhle host (rozbitý TLS řetězec/cert):
+    ...(insecure ? { rejectUnauthorized: false } : {}),
+
+    // 🚑 Railway fix: vynutit IPv4 pro tenhle host (řeší AggregateError z dual-stacku)
+    ...(u.hostname === "pkr.kr-stredocesky.cz" ? { family: 4 } : {})
   };
 
   return await new Promise((resolve, reject) => {
@@ -133,7 +151,7 @@ export async function ingestOnce({ feedUrl }) {
       console.log(`[ingest] fetch ok ${url}`);
       break;
     } catch (e) {
-      const msg = e?.message || String(e);
+      const msg = formatErr(e);
       errors.push({ url, err: msg });
       console.log(`[ingest] fetch fail ${url}: ${msg}`);
     }
