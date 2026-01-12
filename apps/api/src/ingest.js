@@ -1,76 +1,41 @@
-// apps/api/src/ingest.js
 import { parseRss } from "./rss.js";
-import { openDb, ensureSchema, run } from "./db.js";
-
-function extractPlaceDistrictCounty(item) {
-  // description má formát: "stav: ...<br>Město<br>okres XYZ"
-  const desc = (item.description || "").replaceAll("&lt;br&gt;", "\n");
-  const lines = desc
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  // typicky:
-  // 0: "stav: ..."
-  // 1: "Město"
-  // 2: "okres Praha Východ" (ne vždy)
-  const place = lines[1] || null;
-
-  let district = null;
-  let county = null;
-
-  const okresLine = lines.find((l) => l.toLowerCase().startsWith("okres "));
-  if (okresLine) district = okresLine.slice(6).trim();
-
-  // county zatím neumíme z feedu spolehlivě -> necháme null
-  return { place, district, county, raw_place: place };
-}
-
-function toUnixTs(pubDate) {
-  const d = pubDate ? new Date(pubDate) : null;
-  const t = d && !Number.isNaN(d.getTime()) ? Math.floor(d.getTime() / 1000) : null;
-  return t;
-}
+import { upsertIncidents, countGeocodedAttempts } from "./db.js";
 
 export async function ingestOnce({ feedUrl }) {
-  const items = await parseRss(feedUrl);
+  if (!feedUrl) throw new Error("Missing feedUrl");
 
-  const db = openDb();
-  await ensureSchema(db);
+  // Node 18+ has global fetch
+  const r = await fetch(feedUrl, {
+    headers: {
+      "user-agent":
+        "statistika-hasici-stc/1.0 (+https://github.com/martypetrzel-lab/statistika-hasici-stc)",
+      accept: "application/rss+xml, application/xml, text/xml, */*",
+    },
+  });
 
-  let inserted = 0;
-
-  for (const item of items) {
-    const id = item.guid || item.id || item.link;
-    if (!id) continue;
-
-    const ts = toUnixTs(item.pubDate);
-    const { place, district, county, raw_place } = extractPlaceDistrictCounty(item);
-
-    // lat/lon zatím null (geokódování později)
-    const res = await run(
-      db,
-      `
-      INSERT OR IGNORE INTO incidents
-      (id, ts, title, link, place, district, county, lat, lon, raw_place)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-      [
-        id,
-        ts,
-        item.title || null,
-        item.link || null,
-        place,
-        district,
-        county,
-        null,
-        null,
-        raw_place,
-      ]
-    );
-
-    if (res.changes > 0) inserted += 1;
+  if (!r.ok) {
+    // this is where your "Status code 404" was coming from
+    throw new Error(`FEED fetch failed: Status code ${r.status}`);
   }
 
-  return { inserted, total: items.length };
+  const xml = await r.text();
+  const items = await parseRss(xml);
+
+  const normalized = items.map((it) => ({
+    id: it.id,
+    title: it.title,
+    link: it.link,
+    pubDate: it.pubDate,
+    place: it.place,
+  }));
+
+  const beforeGeocodeAttempts = await countGeocodedAttempts();
+  const { upserted } = await upsertIncidents(normalized);
+  const afterGeocodeAttempts = await countGeocodedAttempts();
+
+  return {
+    fetched: normalized.length,
+    upserted,
+    geocoded_attempts: Math.max(0, afterGeocodeAttempts - beforeGeocodeAttempts),
+  };
 }

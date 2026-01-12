@@ -1,77 +1,103 @@
-// apps/api/src/db.js
-import fs from "fs";
-import path from "path";
-import sqlite3 from "sqlite3";
+import fs from "node:fs";
+import path from "node:path";
 
-sqlite3.verbose();
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
+const DB_FILE = path.join(DATA_DIR, "db.json");
 
-function resolveDbPath() {
-  const fromEnv =
-    process.env.DB_PATH ||
-    process.env.SQLITE_PATH ||
-    process.env.DATABASE_PATH;
+let state = {
+  incidents: [],
+  geocodeAttempts: 0,
+};
 
-  if (fromEnv) return fromEnv;
-
-  return path.join(process.cwd(), "data", "hasici.sqlite");
+function ensureDir(p) {
+  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
 
-export function openDb() {
-  const dbPath = resolveDbPath();
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-
-  return new sqlite3.Database(dbPath);
+function load() {
+  ensureDir(DATA_DIR);
+  if (!fs.existsSync(DB_FILE)) {
+    fs.writeFileSync(DB_FILE, JSON.stringify(state, null, 2), "utf-8");
+    return;
+  }
+  const raw = fs.readFileSync(DB_FILE, "utf-8");
+  state = JSON.parse(raw);
+  if (!state.incidents) state.incidents = [];
+  if (typeof state.geocodeAttempts !== "number") state.geocodeAttempts = 0;
 }
 
-export function run(db, sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) return reject(err);
-      resolve({ changes: this.changes, lastID: this.lastID });
-    });
+function save() {
+  ensureDir(DATA_DIR);
+  fs.writeFileSync(DB_FILE, JSON.stringify(state, null, 2), "utf-8");
+}
+
+export async function initDb() {
+  load();
+}
+
+export async function countGeocodedAttempts() {
+  return state.geocodeAttempts || 0;
+}
+
+export async function upsertIncidents(items) {
+  const byId = new Map(state.incidents.map((x) => [x.id, x]));
+  let upserted = 0;
+
+  for (const it of items) {
+    if (!it?.id) continue;
+    const existing = byId.get(it.id);
+
+    if (!existing) {
+      byId.set(it.id, it);
+      upserted++;
+    } else {
+      // update fields (keep stable id)
+      const merged = { ...existing, ...it, id: existing.id };
+      byId.set(it.id, merged);
+      upserted++;
+    }
+  }
+
+  state.incidents = Array.from(byId.values()).sort((a, b) => {
+    const ta = Date.parse(a.pubDate || "") || 0;
+    const tb = Date.parse(b.pubDate || "") || 0;
+    return tb - ta;
   });
+
+  save();
+  return { upserted };
 }
 
-export function get(db, sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) return reject(err);
-      resolve(row);
-    });
-  });
+export async function getPlaces() {
+  const counts = new Map();
+  for (const it of state.incidents) {
+    const place = it.place;
+    if (!place) continue;
+    counts.set(place, (counts.get(place) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([place, count]) => ({ place, count }))
+    .sort((a, b) => b.count - a.count);
 }
 
-export function all(db, sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
-}
+export async function getPlacesStats({ from, to }) {
+  const fromTs = from ? Date.parse(from) : null;
+  const toTs = to ? Date.parse(to) : null;
 
-export async function ensureSchema(db) {
-  await run(
-    db,
-    `
-    CREATE TABLE IF NOT EXISTS incidents (
-      id TEXT PRIMARY KEY,
-      ts INTEGER,
-      title TEXT,
-      link TEXT,
-      place TEXT,
-      district TEXT,
-      county TEXT,
-      lat REAL,
-      lon REAL,
-      raw_place TEXT
-    );
-  `
-  );
+  const counts = new Map();
 
-  await run(db, `CREATE INDEX IF NOT EXISTS idx_incidents_ts ON incidents(ts);`);
-  await run(
-    db,
-    `CREATE INDEX IF NOT EXISTS idx_incidents_place ON incidents(place);`
-  );
+  for (const it of state.incidents) {
+    const place = it.place;
+    if (!place) continue;
+
+    const ts = Date.parse(it.pubDate || "") || 0;
+
+    if (fromTs && ts < fromTs) continue;
+    if (toTs && ts > toTs) continue;
+
+    counts.set(place, (counts.get(place) || 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .map(([place, count]) => ({ place, count }))
+    .sort((a, b) => b.count - a.count);
 }

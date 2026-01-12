@@ -1,67 +1,82 @@
-// apps/api/src/server.js
 import express from "express";
 import cors from "cors";
-
-async function tryLoadDotenv() {
-  try {
-    const mod = await import("dotenv");
-    if (mod?.default?.config) mod.default.config();
-    else if (mod?.config) mod.config();
-  } catch {
-    // ignore
-  }
-}
-
-if (process.env.NODE_ENV !== "production") {
-  await tryLoadDotenv();
-}
+import dotenv from "dotenv";
 
 import { ingestOnce } from "./ingest.js";
-import { openDb, ensureSchema, all } from "./db.js";
+import { initDb, getPlaces, getPlacesStats } from "./db.js";
+
+dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT || 8787);
 const FEED_URL =
-  process.env.RSS_URL ||
-  "https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/rss";
+  process.env.FEED_URL || "https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/rss";
 
+// --- boot DB
+await initDb();
+
+// --- health
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/ingest", async (req, res) => {
+// --- places (simple list)
+app.get("/places", async (req, res) => {
   try {
-    const result = await ingestOnce({ feedUrl: FEED_URL });
-    res.json({ ok: true, ...result });
+    const rows = await getPlaces();
+    res.json({ ok: true, rows });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-// rychlý test výpisu míst (top)
-app.get("/places", async (req, res) => {
+// --- stats/places
+// supports optional query: ?from=2026-01-01&to=2026-01-31
+app.get("/stats/places", async (req, res) => {
   try {
-    const db = openDb();
-    await ensureSchema(db);
+    const from = req.query?.from ? String(req.query.from) : null;
+    const to = req.query?.to ? String(req.query.to) : null;
 
-    const rows = await all(
-      db,
-      `
-      SELECT place, COUNT(*) as count
-      FROM incidents
-      WHERE place IS NOT NULL
-      GROUP BY place
-      ORDER BY count DESC
-      LIMIT 200
-    `
-    );
-    res.json({ ok: true, rows });
+    const data = await getPlacesStats({ from, to });
+    res.json({ ok: true, data });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
+});
+
+// --- ingest
+// POST /ingest  (production way)
+// GET  /ingest  (dev/testing convenience: open in browser)
+async function runIngest(req, res) {
+  try {
+    const feedUrl =
+      (req.body && req.body.feedUrl) ||
+      (req.query && req.query.feedUrl) ||
+      FEED_URL;
+
+    const result = await ingestOnce({ feedUrl });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    // Important: make it obvious if FEED failed (404 etc.)
+    res.status(500).json({
+      ok: false,
+      error: String(e?.message || e),
+      hint:
+        "Pokud vidíš 'Status code 404', je to téměř jistě 404 z RSS feedu (ne z /ingest routy). Zkus otevřít FEED_URL v prohlížeči.",
+      feed: FEED_URL,
+    });
+  }
+}
+
+app.post("/ingest", runIngest);
+app.get("/ingest", runIngest);
+
+// --- 404 fallback
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: "Not found" });
 });
 
 app.listen(PORT, () => {

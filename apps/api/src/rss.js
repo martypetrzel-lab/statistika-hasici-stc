@@ -1,9 +1,50 @@
-// apps/api/src/rss.js
 import Parser from "rss-parser";
 
-const parser = new Parser();
+// rss-parser umí parsovat i XML string (přes parseString)
+const parser = new Parser({
+  customFields: {
+    item: [
+      ["guid", "guid"],
+      ["dc:identifier", "dcIdentifier"],
+    ],
+  },
+});
 
-export async function parseRss(url) {
-  const feed = await parser.parseURL(url);
-  return feed.items || [];
+function pickPlace(title = "") {
+  // TODO: upravíme později podle reálných titulků z PKR
+  // často to bývá "Obec – popis" nebo "Místo: ..."
+  const s = String(title).trim();
+
+  // pokus 1: "OBEC - něco"
+  const dash = s.split(" - ");
+  if (dash.length >= 2) return dash[0].trim();
+
+  // pokus 2: "OBEC – něco" (en-dash)
+  const endash = s.split(" – ");
+  if (endash.length >= 2) return endash[0].trim();
+
+  return null;
+}
+
+export async function parseRss(xmlString) {
+  const feed = await parser.parseString(xmlString);
+
+  const items = (feed.items || []).map((it) => {
+    const id =
+      it.guid ||
+      it.dcIdentifier ||
+      it.id ||
+      it.link ||
+      `${it.title || "item"}|${it.pubDate || ""}`;
+
+    return {
+      id: String(id),
+      title: it.title ? String(it.title) : "",
+      link: it.link ? String(it.link) : "",
+      pubDate: it.pubDate ? String(it.pubDate) : "",
+      place: pickPlace(it.title) || null,
+    };
+  });
+
+  return items;
 }
