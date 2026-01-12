@@ -1,133 +1,76 @@
 // apps/api/src/ingest.js
 import { parseRss } from "./rss.js";
-import { stmts } from "./db.js";
-import { geocodePlace } from "./geocode.js";
+import { openDb, ensureSchema, run } from "./db.js";
 
-function parseEndedAt(text) {
-  if (!text) return null;
-  return text.trim();
-}
-
-function htmlBrToLines(html) {
-  return String(html || "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&")
-    .trim();
-}
-
-function parseDescription(descHtml) {
-  const lines = htmlBrToLines(descHtml)
+function extractPlaceDistrictCounty(item) {
+  // description má formát: "stav: ...<br>Město<br>okres XYZ"
+  const desc = (item.description || "").replaceAll("&lt;br&gt;", "\n");
+  const lines = desc
     .split("\n")
-    .map((l) => l.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
-  let status = null;
-  let ended_at = null;
-  let place = null;
+  // typicky:
+  // 0: "stav: ..."
+  // 1: "Město"
+  // 2: "okres Praha Východ" (ne vždy)
+  const place = lines[1] || null;
+
   let district = null;
+  let county = null;
 
-  for (const l of lines) {
-    if (l.toLowerCase().startsWith("stav:")) status = l.split(":").slice(1).join(":").trim();
-    else if (l.toLowerCase().startsWith("ukončení:"))
-      ended_at = parseEndedAt(l.split(":").slice(1).join(":"));
-    else if (l.toLowerCase().startsWith("okres"))
-      district = l.replace(/^okres\s+/i, "").trim();
-  }
+  const okresLine = lines.find((l) => l.toLowerCase().startsWith("okres "));
+  if (okresLine) district = okresLine.slice(6).trim();
 
-  const candidatePlaces = lines.filter(
-    (l) =>
-      !/^stav:/i.test(l) &&
-      !/^ukončení:/i.test(l) &&
-      !/^km:/i.test(l) &&
-      !/^okres/i.test(l) &&
-      !/^D\d+/i.test(l)
-  );
-
-  if (candidatePlaces.length > 0) {
-    place = candidatePlaces[candidatePlaces.length - 1].trim();
-  }
-
-  return { status, ended_at, place, district, raw_description: lines.join(" | ") };
+  // county zatím neumíme z feedu spolehlivě -> necháme null
+  return { place, district, county, raw_place: place };
 }
 
-function parseTitle(title) {
-  const parts = String(title || "")
-    .split(" - ")
-    .map((p) => p.trim())
-    .filter(Boolean);
-
-  const category = parts[0] || null;
-  const subtype = parts.length >= 3 ? parts.slice(1, -1).join(" - ") : (parts[1] || null);
-  return { category, subtype };
+function toUnixTs(pubDate) {
+  const d = pubDate ? new Date(pubDate) : null;
+  const t = d && !Number.isNaN(d.getTime()) ? Math.floor(d.getTime() / 1000) : null;
+  return t;
 }
 
-// zatím necháváme null, dokud nebudeme mít jednotný formát ended_at
-function computeDurationMinutes(_pubDateIso, _endedAtText) {
-  return null;
-}
+export async function ingestOnce({ feedUrl }) {
+  const items = await parseRss(feedUrl);
 
-async function ensurePlaceCoords(place, district) {
-  if (!place) return;
+  const db = openDb();
+  await ensureSchema(db);
 
-  const existing = await stmts.getPlace({ place, district: district || null });
-  if (existing && existing.lat != null && existing.lon != null) return;
+  let inserted = 0;
 
-  const geo = await geocodePlace(place);
-  if (!geo) return;
+  for (const item of items) {
+    const id = item.guid || item.id || item.link;
+    if (!id) continue;
 
-  await stmts.upsertPlaceCoords({
-    place,
-    district: district || null,
-    lat: geo.lat,
-    lon: geo.lon,
-    provider: geo.provider,
-  });
-}
+    const ts = toUnixTs(item.pubDate);
+    const { place, district, county, raw_place } = extractPlaceDistrictCounty(item);
 
-export async function ingestOnce() {
-  const rssUrl = process.env.RSS_URL;
-  if (!rssUrl) throw new Error("RSS_URL is not set");
+    // lat/lon zatím null (geokódování později)
+    const res = await run(
+      db,
+      `
+      INSERT OR IGNORE INTO incidents
+      (id, ts, title, link, place, district, county, lat, lon, raw_place)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+      [
+        id,
+        ts,
+        item.title || null,
+        item.link || null,
+        place,
+        district,
+        county,
+        null,
+        null,
+        raw_place,
+      ]
+    );
 
-  const feed = await parseRss(rssUrl);
-
-  let upserted = 0;
-
-  for (const it of feed.items) {
-    const { category, subtype } = parseTitle(it.title);
-    const parsed = parseDescription(it.description);
-
-    const pub_date = it.pubDateIso;
-    const duration_minutes = computeDurationMinutes(pub_date, parsed.ended_at);
-
-    await stmts.upsertIncident({
-      guid: it.guid,
-      title: it.title,
-      link: it.link,
-      pub_date,
-      category,
-      subtype,
-      place: parsed.place,
-      district: parsed.district,
-      status: parsed.status,
-      ended_at: parsed.ended_at,
-      duration_minutes,
-      raw_description: parsed.raw_description,
-    });
-
-    upserted++;
+    if (res.changes > 0) inserted += 1;
   }
 
-  const missing = await stmts.placesMissingCoords({ limit: 5 });
-  for (const row of missing) {
-    await ensurePlaceCoords(row.place, row.district);
-  }
-
-  return {
-    ok: true,
-    fetched: feed.items.length,
-    upserted,
-    geocoded_attempts: missing.length,
-  };
+  return { inserted, total: items.length };
 }
