@@ -1,27 +1,28 @@
 import Parser from "rss-parser";
 
-// rss-parser umí parsovat i XML string (přes parseString)
 const parser = new Parser({
   customFields: {
     item: [
       ["guid", "guid"],
-      ["dc:identifier", "dcIdentifier"],
-    ],
-  },
+      ["dc:identifier", "dcIdentifier"]
+    ]
+  }
 });
 
 function pickPlace(title = "") {
-  // TODO: upravíme později podle reálných titulků z PKR
-  // často to bývá "Obec – popis" nebo "Místo: ..."
   const s = String(title).trim();
 
-  // pokus 1: "OBEC - něco"
+  // nejčastější: "OBEC - něco"
   const dash = s.split(" - ");
   if (dash.length >= 2) return dash[0].trim();
 
-  // pokus 2: "OBEC – něco" (en-dash)
+  // "OBEC – něco"
   const endash = s.split(" – ");
   if (endash.length >= 2) return endash[0].trim();
+
+  // "OBEC: něco"
+  const colon = s.split(": ");
+  if (colon.length >= 2 && colon[0].length <= 40) return colon[0].trim();
 
   return null;
 }
@@ -42,7 +43,7 @@ export async function parseRss(xmlString) {
       title: it.title ? String(it.title) : "",
       link: it.link ? String(it.link) : "",
       pubDate: it.pubDate ? String(it.pubDate) : "",
-      place: pickPlace(it.title) || null,
+      place: pickPlace(it.title) || null
     };
   });
 

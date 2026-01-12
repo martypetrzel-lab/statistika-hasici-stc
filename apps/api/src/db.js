@@ -1,103 +1,155 @@
-import fs from "node:fs";
-import path from "node:path";
+import pg from "pg";
+const { Pool } = pg;
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
-const DB_FILE = path.join(DATA_DIR, "db.json");
+let pool;
 
-let state = {
-  incidents: [],
-  geocodeAttempts: 0,
-};
-
-function ensureDir(p) {
-  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
-}
-
-function load() {
-  ensureDir(DATA_DIR);
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify(state, null, 2), "utf-8");
-    return;
-  }
-  const raw = fs.readFileSync(DB_FILE, "utf-8");
-  state = JSON.parse(raw);
-  if (!state.incidents) state.incidents = [];
-  if (typeof state.geocodeAttempts !== "number") state.geocodeAttempts = 0;
-}
-
-function save() {
-  ensureDir(DATA_DIR);
-  fs.writeFileSync(DB_FILE, JSON.stringify(state, null, 2), "utf-8");
-}
-
+/**
+ * Railway: DATABASE_URL je v env automaticky (pokud přidáš Postgres plugin).
+ * Lokálně: nastav DATABASE_URL ručně (nebo použij Railway PG proxy).
+ */
 export async function initDb() {
-  load();
+  if (!process.env.DATABASE_URL) {
+    throw new Error(
+      "Missing DATABASE_URL. Na Railway přidej PostgreSQL plugin nebo nastav env DATABASE_URL."
+    );
+  }
+
+  if (!pool) {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl:
+        process.env.DATABASE_SSL === "0"
+          ? false
+          : {
+              rejectUnauthorized: false
+            }
+    });
+  }
+
+  // tabulky
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS incidents (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      link TEXT,
+      pub_date TIMESTAMPTZ,
+      place TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
+  // indexy pro rychlost
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_incidents_pub_date ON incidents(pub_date DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_incidents_place ON incidents(place);`);
 }
 
-export async function countGeocodedAttempts() {
-  return state.geocodeAttempts || 0;
+function parsePubDate(pubDateStr) {
+  if (!pubDateStr) return null;
+  const d = new Date(pubDateStr);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
 }
 
 export async function upsertIncidents(items) {
-  const byId = new Map(state.incidents.map((x) => [x.id, x]));
+  if (!pool) throw new Error("DB not initialized");
+
   let upserted = 0;
 
+  // jednoduchý upsert po jednom (na začátek ok; později zrychlíme batch)
   for (const it of items) {
-    if (!it?.id) continue;
-    const existing = byId.get(it.id);
+    const pubDateIso = parsePubDate(it.pubDate);
 
-    if (!existing) {
-      byId.set(it.id, it);
-      upserted++;
-    } else {
-      // update fields (keep stable id)
-      const merged = { ...existing, ...it, id: existing.id };
-      byId.set(it.id, merged);
-      upserted++;
-    }
+    const r = await pool.query(
+      `
+      INSERT INTO incidents (id, title, link, pub_date, place)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (id) DO UPDATE SET
+        title = EXCLUDED.title,
+        link = EXCLUDED.link,
+        pub_date = EXCLUDED.pub_date,
+        place = EXCLUDED.place
+      `,
+      [String(it.id), String(it.title || ""), String(it.link || ""), pubDateIso, it.place]
+    );
+
+    // pg u INSERT/UPSERT nevrací "changes", takže to počítáme hrubě:
+    upserted += r.rowCount ? 1 : 0;
   }
 
-  state.incidents = Array.from(byId.values()).sort((a, b) => {
-    const ta = Date.parse(a.pubDate || "") || 0;
-    const tb = Date.parse(b.pubDate || "") || 0;
-    return tb - ta;
-  });
-
-  save();
   return { upserted };
 }
 
-export async function getPlaces() {
-  const counts = new Map();
-  for (const it of state.incidents) {
-    const place = it.place;
-    if (!place) continue;
-    counts.set(place, (counts.get(place) || 0) + 1);
-  }
-  return Array.from(counts.entries())
-    .map(([place, count]) => ({ place, count }))
-    .sort((a, b) => b.count - a.count);
+export async function getIncidents({ limit = 200 } = {}) {
+  if (!pool) throw new Error("DB not initialized");
+  const r = await pool.query(
+    `
+    SELECT id, title, link, pub_date, place
+    FROM incidents
+    ORDER BY pub_date DESC NULLS LAST, created_at DESC
+    LIMIT $1
+    `,
+    [Number(limit)]
+  );
+  return r.rows;
 }
 
-export async function getPlacesStats({ from, to }) {
-  const fromTs = from ? Date.parse(from) : null;
-  const toTs = to ? Date.parse(to) : null;
+export async function getPlaces({ limit = 200 } = {}) {
+  if (!pool) throw new Error("DB not initialized");
+  const r = await pool.query(
+    `
+    SELECT place, COUNT(*)::int AS count
+    FROM incidents
+    WHERE place IS NOT NULL AND place <> ''
+    GROUP BY place
+    ORDER BY count DESC, place ASC
+    LIMIT $1
+    `,
+    [Number(limit)]
+  );
+  return r.rows;
+}
 
-  const counts = new Map();
+export async function getPlacesStats({ from = null, to = null, limit = 30 } = {}) {
+  if (!pool) throw new Error("DB not initialized");
 
-  for (const it of state.incidents) {
-    const place = it.place;
-    if (!place) continue;
+  // Filtry času – volitelné
+  const where = [];
+  const params = [];
+  let p = 1;
 
-    const ts = Date.parse(it.pubDate || "") || 0;
-
-    if (fromTs && ts < fromTs) continue;
-    if (toTs && ts > toTs) continue;
-
-    counts.set(place, (counts.get(place) || 0) + 1);
+  if (from) {
+    where.push(`pub_date >= $${p++}`);
+    params.push(new Date(from).toISOString());
+  }
+  if (to) {
+    // to jako konec dne
+    const end = new Date(to);
+    end.setHours(23, 59, 59, 999);
+    where.push(`pub_date <= $${p++}`);
+    params.push(end.toISOString());
   }
 
-  return Array.from(counts.entries())
-    .map(([place, count]) => ({ place, count }))
-    .sort((a, b) => b.count - a.count);
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  // top places
+  params.push(Number(limit));
+  const r = await pool.query(
+    `
+    SELECT place, COUNT(*)::int AS count
+    FROM incidents
+    ${whereSql}
+    AND place IS NOT NULL AND place <> ''
+    GROUP BY place
+    ORDER BY count DESC, place ASC
+    LIMIT $${p++}
+    `,
+    params
+  );
+
+  return r.rows;
+}
+
+// kompatibilita s tvým ingest.js (zatím bez geocode)
+export async function countGeocodedAttempts() {
+  return 0;
 }

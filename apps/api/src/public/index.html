@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="cs">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Hasiči STČ – zásahy (RSS → statistiky)</title>
+
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="wrap">
+        <div class="title">
+          <h1>Hasiči STČ – zásahy</h1>
+          <p class="sub">RSS ingest + statistiky (běží nonstop na Railway)</p>
+        </div>
+
+        <div class="actions">
+          <button id="btnIngest" class="btn">Načíst teď</button>
+          <a class="btn btnGhost" href="/health" target="_blank">health</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="wrap grid">
+      <section class="card">
+        <div class="cardHeader">
+          <h2>Top místa (počty)</h2>
+          <div class="hint">z databáze</div>
+        </div>
+        <canvas id="chartPlaces" height="140"></canvas>
+      </section>
+
+      <section class="card">
+        <div class="cardHeader">
+          <h2>Poslední zásahy</h2>
+          <div class="hint">nejnovější nahoře</div>
+        </div>
+        <div id="incidents" class="list"></div>
+      </section>
+
+      <section class="card full">
+        <div class="cardHeader">
+          <h2>Souhrn</h2>
+          <div id="status" class="hint">načítám…</div>
+        </div>
+
+        <div class="kpis">
+          <div class="kpi">
+            <div class="kpiLabel">Incidentů (zobrazeno)</div>
+            <div id="kpiInc" class="kpiValue">–</div>
+          </div>
+          <div class="kpi">
+            <div class="kpiLabel">Různých míst</div>
+            <div id="kpiPlaces" class="kpiValue">–</div>
+          </div>
+          <div class="kpi">
+            <div class="kpiLabel">Auto-ingest</div>
+            <div id="kpiIngest" class="kpiValue">Railway</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer wrap">
+      <span>Zdroj RSS: </span>
+      <a
+        href="https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml"
+        target="_blank"
+        rel="noreferrer"
+      >
+        pkr.kr-stredocesky.cz / feed.xml
+      </a>
+    </footer>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
