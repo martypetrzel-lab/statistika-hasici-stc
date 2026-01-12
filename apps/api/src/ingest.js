@@ -1,19 +1,35 @@
+import { Agent } from "undici";
 import { parseRss } from "./rss.js";
 import { upsertIncidents, countGeocodedAttempts } from "./db.js";
 
+// Insecure TLS agent – POUZE pro konkrétní host (rozbitý TLS řetězec / cert chain).
+const insecureAgent = new Agent({
+  connect: {
+    rejectUnauthorized: false
+  }
+});
+
+function getTimeoutMs() {
+  const v = Number(process.env.INGEST_FETCH_TIMEOUT_MS || 60000);
+  return Number.isFinite(v) && v > 0 ? v : 60000;
+}
+
 function buildCandidates(feedUrl) {
-  // Dáme proxy první (Railway často narazí na TLS/latenci u originu)
+  // Zkusíme origin, pak proxy (nechávám pro případ, že se časem chytí).
   return [
+    feedUrl,
     "https://api.allorigins.win/raw?url=" + encodeURIComponent(feedUrl),
-    "https://r.jina.ai/" + feedUrl,
-    feedUrl
+    "https://r.jina.ai/" + feedUrl
   ];
 }
 
-function getTimeoutMs() {
-  // lze přenastavit v Railway Variables: INGEST_FETCH_TIMEOUT_MS=60000
-  const v = Number(process.env.INGEST_FETCH_TIMEOUT_MS || 45000);
-  return Number.isFinite(v) && v > 0 ? v : 45000;
+function shouldUseInsecureTls(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname === "pkr.kr-stredocesky.cz";
+  } catch {
+    return false;
+  }
 }
 
 async function fetchWithTimeout(url, { timeoutMs, headers }) {
@@ -21,7 +37,17 @@ async function fetchWithTimeout(url, { timeoutMs, headers }) {
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
 
   try {
-    return await fetch(url, { signal: ctrl.signal, headers });
+    const opts = {
+      signal: ctrl.signal,
+      headers
+    };
+
+    // Pouze pro origin host použijeme insecure TLS (jinak normální fetch).
+    if (shouldUseInsecureTls(url)) {
+      opts.dispatcher = insecureAgent;
+    }
+
+    return await fetch(url, opts);
   } finally {
     clearTimeout(t);
   }
@@ -68,7 +94,6 @@ export async function ingestOnce({ feedUrl }) {
   }
 
   if (!response) {
-    // vypíšeme souhrn – výrazně pomůže debug
     const summary = errors.map((x) => `${x.url} => ${x.err}`).join(" | ");
     throw new Error(`FEED fetch failed: ${summary}`);
   }
