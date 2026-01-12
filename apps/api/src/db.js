@@ -20,13 +20,10 @@ export async function initDb() {
       ssl:
         process.env.DATABASE_SSL === "0"
           ? false
-          : {
-              rejectUnauthorized: false
-            }
+          : { rejectUnauthorized: false }
     });
   }
 
-  // tabulky
   await pool.query(`
     CREATE TABLE IF NOT EXISTS incidents (
       id TEXT PRIMARY KEY,
@@ -38,9 +35,12 @@ export async function initDb() {
     );
   `);
 
-  // indexy pro rychlost
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_incidents_pub_date ON incidents(pub_date DESC);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_incidents_place ON incidents(place);`);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_incidents_pub_date ON incidents(pub_date DESC);`
+  );
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_incidents_place ON incidents(place);`
+  );
 }
 
 function parsePubDate(pubDateStr) {
@@ -55,7 +55,6 @@ export async function upsertIncidents(items) {
 
   let upserted = 0;
 
-  // jednoduchý upsert po jednom (na začátek ok; později zrychlíme batch)
   for (const it of items) {
     const pubDateIso = parsePubDate(it.pubDate);
 
@@ -69,10 +68,15 @@ export async function upsertIncidents(items) {
         pub_date = EXCLUDED.pub_date,
         place = EXCLUDED.place
       `,
-      [String(it.id), String(it.title || ""), String(it.link || ""), pubDateIso, it.place]
+      [
+        String(it.id),
+        String(it.title || ""),
+        String(it.link || ""),
+        pubDateIso,
+        it.place
+      ]
     );
 
-    // pg u INSERT/UPSERT nevrací "changes", takže to počítáme hrubě:
     upserted += r.rowCount ? 1 : 0;
   }
 
@@ -81,6 +85,7 @@ export async function upsertIncidents(items) {
 
 export async function getIncidents({ limit = 200 } = {}) {
   if (!pool) throw new Error("DB not initialized");
+
   const r = await pool.query(
     `
     SELECT id, title, link, pub_date, place
@@ -90,11 +95,13 @@ export async function getIncidents({ limit = 200 } = {}) {
     `,
     [Number(limit)]
   );
+
   return r.rows;
 }
 
 export async function getPlaces({ limit = 200 } = {}) {
   if (!pool) throw new Error("DB not initialized");
+
   const r = await pool.query(
     `
     SELECT place, COUNT(*)::int AS count
@@ -106,14 +113,14 @@ export async function getPlaces({ limit = 200 } = {}) {
     `,
     [Number(limit)]
   );
+
   return r.rows;
 }
 
 export async function getPlacesStats({ from = null, to = null, limit = 30 } = {}) {
   if (!pool) throw new Error("DB not initialized");
 
-  // Filtry času – volitelné
-  const where = [];
+  const where = ["place IS NOT NULL AND place <> ''"];
   const params = [];
   let p = 1;
 
@@ -121,24 +128,23 @@ export async function getPlacesStats({ from = null, to = null, limit = 30 } = {}
     where.push(`pub_date >= $${p++}`);
     params.push(new Date(from).toISOString());
   }
+
   if (to) {
-    // to jako konec dne
     const end = new Date(to);
     end.setHours(23, 59, 59, 999);
     where.push(`pub_date <= $${p++}`);
     params.push(end.toISOString());
   }
 
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const whereSql = `WHERE ${where.join(" AND ")}`;
 
-  // top places
   params.push(Number(limit));
+
   const r = await pool.query(
     `
     SELECT place, COUNT(*)::int AS count
     FROM incidents
     ${whereSql}
-    AND place IS NOT NULL AND place <> ''
     GROUP BY place
     ORDER BY count DESC, place ASC
     LIMIT $${p++}
@@ -149,7 +155,7 @@ export async function getPlacesStats({ from = null, to = null, limit = 30 } = {}
   return r.rows;
 }
 
-// kompatibilita s tvým ingest.js (zatím bez geocode)
+// kompatibilita s ingest.js (zatím bez geocode)
 export async function countGeocodedAttempts() {
   return 0;
 }
