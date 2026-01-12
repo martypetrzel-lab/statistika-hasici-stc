@@ -13,7 +13,7 @@ app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 8787);
 const FEED_URL =
-  process.env.FEED_URL || "https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/rss";
+  process.env.FEED_URL || "https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml";
 
 // --- boot DB
 await initDb();
