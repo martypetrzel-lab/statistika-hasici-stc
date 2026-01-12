@@ -1,16 +1,38 @@
 // apps/api/src/server.js
-import "dotenv/config";
+import http from "http";
 import express from "express";
 
-import { ingestOnce } from "./ingest.js";
-import { stmts } from "./db.js";
+import { openDb, ensureSchema } from "./db.js";
+import { runIngest } from "./ingest.js";
+
+// dotenv je jen pro lokální běh (když existuje). Na Railway se proměnné nastavují v UI.
+// Když dotenv není nainstalované (např. production install bez devDependencies), nic se nestane.
+async function tryLoadDotenv() {
+  try {
+    const mod = await import("dotenv");
+    if (mod?.default?.config) mod.default.config();
+    else if (mod?.config) mod.config();
+  } catch {
+    // ignore
+  }
+}
+
+// spusť dotenv jen mimo production
+if (process.env.NODE_ENV !== "production") {
+  await tryLoadDotenv();
+}
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 8787);
 
-app.get("/health", (_req, res) => {
+// DB init (SQLite soubor musí být na volume / persistent path)
+const db = openDb();
+ensureSchema(db);
+
+// health
+app.get("/health", (req, res) => {
   res.json({
     ok: true,
     service: "hasici-stc-api",
@@ -18,62 +40,55 @@ app.get("/health", (_req, res) => {
   });
 });
 
-async function handleIngest(_req, res) {
+// ingest endpoint (ruční spuštění)
+app.get("/ingest", async (req, res) => {
   try {
-    const result = await ingestOnce();
+    const result = await runIngest(db);
     res.json({ ok: true, ...result });
-  } catch (err) {
-    res.status(500).json({
-      ok: false,
-      error: String(err?.message || err),
-    });
-  }
-}
-
-app.get("/ingest", handleIngest);
-app.post("/ingest", handleIngest);
-
-// --- STATS ---
-app.get("/stats/places", async (_req, res) => {
-  try {
-    const rows = await stmts.statsPlaces({});
-    res.json({ ok: true, data: rows });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-app.get("/stats/categories", async (_req, res) => {
+// stats: places (s volitelným filtrem času)
+app.get("/stats/places", (req, res) => {
   try {
-    const rows = await stmts.statsCategories({});
+    const from = req.query.from ? Number(req.query.from) : null;
+    const to = req.query.to ? Number(req.query.to) : null;
+
+    const where = [];
+    const params = {};
+    if (from) {
+      where.push("ts >= @from");
+      params.from = from;
+    }
+    if (to) {
+      where.push("ts <= @to");
+      params.to = to;
+    }
+
+    const sql = `
+      SELECT
+        place as name,
+        district,
+        county,
+        COUNT(*) as count
+      FROM incidents
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      GROUP BY place, district, county
+      ORDER BY count DESC
+      LIMIT 500
+    `;
+
+    const rows = db.prepare(sql).all(params);
     res.json({ ok: true, data: rows });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-app.get("/stats/districts", async (_req, res) => {
-  try {
-    const rows = await stmts.statsDistricts({});
-    res.json({ ok: true, data: rows });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
-
-// --- MAP ---
-app.get("/map/places", async (_req, res) => {
-  try {
-    const rows = await stmts.mapPlaces({});
-    res.json({ ok: true, data: rows });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
-
-app.listen(PORT, () => {
+// start
+const server = http.createServer(app);
+server.listen(PORT, () => {
   console.log(`[api] listening on :${PORT}`);
-  if (!process.env.RSS_URL) {
-    console.log("[api] WARNING: RSS_URL is not set (ingest will fail until you set it).");
-  }
 });
