@@ -3,42 +3,45 @@ name: Push RSS to Railway API
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *" # každých 5 minut
+    - cron: "*/10 * * * *" # každých 10 minut
 
 jobs:
   push:
     runs-on: ubuntu-latest
     steps:
-      - name: Push RSS to Railway API (robust)
+      - name: Trigger ingest on Railway
+        shell: bash
         env:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
           RSS_URL: ${{ secrets.RSS_URL }}
         run: |
           set -euo pipefail
 
-          if [ -z "${INGEST_API_URL:-}" ]; then
+          # povinné
+          if [[ -z "${INGEST_API_URL:-}" ]]; then
             echo "Missing secret INGEST_API_URL"
             exit 1
           fi
 
-          if [ -z "${RSS_URL:-}" ]; then
-            echo "Missing secret RSS_URL"
-            exit 1
-          fi
+          # uklidíme případný trailing slash
+          BASE="${INGEST_API_URL%/}"
+
+          # RSS_URL je volitelné – když není secret, použijeme tvoji doménu
+          FEED="${RSS_URL:-https://rss.statistikahasici.org/}"
+
+          echo "INGEST_API_URL=$BASE"
+          echo "RSS_URL=$FEED"
 
           echo "Testing API reachability..."
-          curl -4 --show-error --fail --connect-timeout 20 --max-time 60 "$INGEST_API_URL/health" || true
+          curl -fsS --connect-timeout 20 --max-time 30 "$BASE/health" >/dev/null
 
           echo "Pushing ingest trigger..."
-          # POZOR: endpoint je /api/ingest (ne /ingest)
-          curl -4 --show-error --fail-with-body \
-            --connect-timeout 20 \
-            --max-time 120 \
+          curl -fsS \
             --retry 10 \
             --retry-all-errors \
             --retry-delay 5 \
+            --connect-timeout 20 \
+            --max-time 60 \
             -H "Content-Type: application/json" \
-            -X POST "$INGEST_API_URL/api/ingest" \
-            --data "{\"feedUrl\":\"$RSS_URL\"}"
-
-          echo "Done."
+            -d "{\"feedUrl\":\"$FEED\"}" \
+            "$BASE/api/ingest"
