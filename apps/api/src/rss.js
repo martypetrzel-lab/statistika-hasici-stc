@@ -27,8 +27,28 @@ function pickPlace(title = "") {
   return null;
 }
 
+function sanitizeXml(xmlString) {
+  if (typeof xmlString !== "string") return "";
+
+  // pryč BOM
+  let s = xmlString.replace(/^\uFEFF/, "");
+
+  // někdy bývá něco před prvním tagem -> vezmeme až od prvního "<"
+  const i = s.indexOf("<");
+  if (i > 0) s = s.slice(i);
+
+  return s;
+}
+
 export async function parseRss(xmlString) {
-  const feed = await parser.parseString(xmlString);
+  const xml = sanitizeXml(xmlString);
+
+  // Pojistka: kdyby upstream vrátil něco úplně mimo
+  if (!xml.trimStart().startsWith("<")) {
+    throw new Error("parseRss: input is not XML (missing '<' at start)");
+  }
+
+  const feed = await parser.parseString(xml);
 
   const items = (feed.items || []).map((it) => {
     const id =
