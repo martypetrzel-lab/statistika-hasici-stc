@@ -11,23 +11,33 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Download RSS via Cloudflare Worker
+      - name: Download RSS (prefer Cloudflare Worker, fallback direct)
         run: |
           set -e
 
-          echo "Fetching RSS from Cloudflare Worker…"
+          WORKER_URL="https://white-glade-3f1c.martypetrzel.workers.dev/"
+          DIRECT_URL="https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml"
 
-          curl -L \
-            --fail \
-            --max-time 60 \
-            --connect-timeout 15 \
-            --retry 3 \
-            --retry-delay 3 \
-            --retry-all-errors \
-            -H "User-Agent: statistika-hasici-stc/1.0 (+https://github.com)" \
-            -H "Accept: application/xml,text/xml,application/rss+xml,*/*" \
-            "https://white-glade-3f1c.martypetrzel.workers.dev/" \
-            -o feed.xml
+          fetch() {
+            local url="$1"
+            echo "Fetching: $url"
+            curl -L --fail \
+              --max-time 60 --connect-timeout 15 \
+              --retry 5 --retry-delay 3 --retry-all-errors \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36" \
+              -H "Accept: application/xml,text/xml,application/rss+xml,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8" \
+              -H "Accept-Language: cs,en;q=0.8" \
+              -H "Cache-Control: no-cache" \
+              -H "Pragma: no-cache" \
+              --compressed \
+              "$url" -o feed.xml
+          }
+
+          # 1) primárně přes Worker
+          if ! fetch "$WORKER_URL"; then
+            echo "Worker failed, trying direct RSS…"
+            fetch "$DIRECT_URL"
+          fi
 
           test -s feed.xml
           echo "RSS downloaded. Size: $(wc -c < feed.xml) bytes"
@@ -39,21 +49,11 @@ jobs:
         run: |
           set -e
 
-          echo "Railway base URL: ${INGEST_API_URL}"
+          echo "Pushing to Railway: ${INGEST_API_URL}/api/ingest/raw"
 
-          # volitelně: rychlý health check (nepovinný)
-          echo "Preflight: GET /health (may fail if endpoint doesn't exist, that's OK)"
-          curl -L --max-time 15 --connect-timeout 10 "${INGEST_API_URL}/health" || true
-
-          echo "Pushing RSS to Railway…"
-
-          curl -L \
-            --fail \
-            --max-time 60 \
-            --connect-timeout 15 \
-            --retry 5 \
-            --retry-delay 5 \
-            --retry-all-errors \
+          curl -L --fail \
+            --max-time 60 --connect-timeout 15 \
+            --retry 5 --retry-delay 5 --retry-all-errors \
             -H "Authorization: Bearer ${INGEST_TOKEN}" \
             -H "Content-Type: application/xml; charset=utf-8" \
             --data-binary @feed.xml \
