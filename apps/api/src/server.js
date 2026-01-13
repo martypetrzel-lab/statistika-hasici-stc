@@ -18,8 +18,12 @@ app.use(
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 8787);
+
+// ✅ ber i RSS_URL (Cloudflare proxy), pokud existuje
 const FEED_URL =
-  process.env.FEED_URL || "https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml";
+  process.env.RSS_URL ||
+  process.env.FEED_URL ||
+  "https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -73,16 +77,29 @@ app.get("/api/stats/places", async (req, res) => {
 
 // Ingest endpoint
 async function runIngest(req, res) {
+  const feedUrl =
+    (req.body && req.body.feedUrl) ||
+    (req.query && req.query.feedUrl) ||
+    FEED_URL;
+
+  // ✅ když dáš ?async=1, vrátí to odpověď hned a ingest doběhne na pozadí
+  const asyncMode =
+    String(req.query?.async || "0") === "1" || String(req.query?.async) === "true";
+
   try {
-    const feedUrl =
-      (req.body && req.body.feedUrl) ||
-      (req.query && req.query.feedUrl) ||
-      FEED_URL;
+    if (asyncMode) {
+      // fire-and-forget
+      ingestOnce({ feedUrl })
+        .then((r) => console.log(`[ingest] async ok fetched=${r.fetched} upserted=${r.upserted}`))
+        .catch((e) => console.error(`[ingest] async fail`, e?.message || e));
+
+      return res.status(202).json({ ok: true, started: true, feedUrl });
+    }
 
     const result = await ingestOnce({ feedUrl });
-    res.json({ ok: true, ...result });
+    return res.json({ ok: true, ...result });
   } catch (e) {
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
       error: String(e?.message || e),
       feed: FEED_URL
