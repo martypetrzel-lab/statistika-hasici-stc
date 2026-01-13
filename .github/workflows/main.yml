@@ -1,3 +1,15 @@
+name: RSS ingest (push to API)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Push RSS to Railway API (robust)
         env:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
@@ -5,11 +17,22 @@
         run: |
           set -euo pipefail
 
+          if [ -z "${INGEST_API_URL:-}" ]; then
+            echo "Missing secret INGEST_API_URL"
+            exit 1
+          fi
+
+          if [ -z "${RSS_URL:-}" ]; then
+            echo "Missing secret RSS_URL"
+            exit 1
+          fi
+
           echo "INGEST_API_URL=$INGEST_API_URL"
           echo "RSS_URL=$RSS_URL"
 
           echo "Testing API reachability..."
-          curl -4 -v --show-error --fail --connect-timeout 20 --max-time 60 "$INGEST_API_URL/health" || true
+          curl -4 -v --show-error --fail --connect-timeout 20 --max-time 60 \
+            "$INGEST_API_URL/health" || true
 
           echo "Pushing RSS..."
           curl -4 --show-error --fail-with-body \
