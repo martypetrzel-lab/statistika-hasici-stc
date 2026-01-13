@@ -2,7 +2,6 @@ name: RSS ingest (push to Railway)
 
 on:
   schedule:
-    # každých 10 minut
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
@@ -22,29 +21,39 @@ jobs:
             --fail \
             --max-time 60 \
             --connect-timeout 15 \
+            --retry 3 \
+            --retry-delay 3 \
+            --retry-all-errors \
             -H "User-Agent: statistika-hasici-stc/1.0 (+https://github.com)" \
             -H "Accept: application/xml,text/xml,application/rss+xml,*/*" \
             "https://white-glade-3f1c.martypetrzel.workers.dev/" \
             -o feed.xml
 
-          echo "RSS downloaded:"
-          echo "----------------"
-          head -n 20 feed.xml
-          echo "----------------"
-          echo "Size: $(wc -c < feed.xml) bytes"
+          test -s feed.xml
+          echo "RSS downloaded. Size: $(wc -c < feed.xml) bytes"
 
-      - name: Push RSS to Railway API
+      - name: Push RSS to Railway API (with retry)
         env:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
         run: |
           set -e
 
+          echo "Railway base URL: ${INGEST_API_URL}"
+
+          # volitelně: rychlý health check (nepovinný)
+          echo "Preflight: GET /health (may fail if endpoint doesn't exist, that's OK)"
+          curl -L --max-time 15 --connect-timeout 10 "${INGEST_API_URL}/health" || true
+
           echo "Pushing RSS to Railway…"
 
           curl -L \
             --fail \
             --max-time 60 \
+            --connect-timeout 15 \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
             -H "Authorization: Bearer ${INGEST_TOKEN}" \
             -H "Content-Type: application/xml; charset=utf-8" \
             --data-binary @feed.xml \
