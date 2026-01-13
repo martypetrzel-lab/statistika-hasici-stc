@@ -1,4 +1,4 @@
-name: RSS ingest (trigger)
+name: RSS -> Railway ingest
 
 on:
   workflow_dispatch:
@@ -6,29 +6,47 @@ on:
     - cron: "*/5 * * * *"
 
 jobs:
-  trigger:
+  push:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Trigger ingest on Railway (async)
-        env:
-          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
-          RSS_URL: ${{ secrets.RSS_URL }}
+      - name: Set vars
+        run: |
+          echo "INGEST_API_URL=${{ secrets.INGEST_API_URL }}" >> $GITHUB_ENV
+          echo "RSS_URL=${{ secrets.RSS_URL }}" >> $GITHUB_ENV
+
+      - name: Validate secrets
+        run: |
+          if [ -z "${INGEST_API_URL:-}" ]; then
+            echo "Missing secret INGEST_API_URL"
+            exit 1
+          fi
+          if [ -z "${RSS_URL:-}" ]; then
+            echo "Missing secret RSS_URL"
+            exit 1
+          fi
+
+      - name: Download RSS
         run: |
           set -euo pipefail
+          echo "Downloading RSS: $RSS_URL"
+          curl -fsSL --max-time 60 "$RSS_URL" -o feed.xml
+          echo "RSS bytes: $(wc -c < feed.xml)"
+          head -c 200 feed.xml || true
+          echo ""
 
-          echo "Testing API reachability..."
-          curl --show-error --fail --connect-timeout 15 --max-time 30 "${INGEST_API_URL}/health"
+      - name: Test API health
+        run: |
+          set -euo pipefail
+          echo "Testing API health..."
+          curl -fsSL --max-time 20 "${INGEST_API_URL%/}/health"
+          echo ""
 
-          echo "Trigger ingest (async)..."
-          curl --show-error --fail-with-body \
-            --connect-timeout 15 \
-            --max-time 30 \
-            --retry 10 \
-            --retry-all-errors \
-            --retry-delay 5 \
-            -H "Content-Type: application/json" \
-            -X POST "${INGEST_API_URL}/api/ingest?async=1" \
-            --data "{\"feedUrl\":\"${RSS_URL}\"}"
-
-          echo "Done."
+      - name: Push XML to Railway /api/ingest
+        run: |
+          set -euo pipefail
+          echo "Posting XML to ${INGEST_API_URL%/}/api/ingest"
+          curl -fsSL --max-time 60 \
+            -X POST "${INGEST_API_URL%/}/api/ingest" \
+            -H "Content-Type: application/xml; charset=utf-8" \
+            --data-binary @feed.xml
+          echo ""
