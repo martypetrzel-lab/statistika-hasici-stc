@@ -2,7 +2,7 @@ name: RSS ingest (push to Railway)
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/10 * * * *" # každých 10 minut
   workflow_dispatch: {}
 
 jobs:
@@ -11,34 +11,14 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Fetch RSS feed (with fallbacks)
+      - name: Fetch RSS feed (via Cloudflare Worker)
         run: |
           set -e
-
-          URL1="https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml"
-          URL2="https://r.jina.ai/http://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml"
-          URL3="https://api.allorigins.win/raw?url=https%3A%2F%2Fpkr.kr-stredocesky.cz%2Fpkr%2Fzasahy-jpo%2Ffeed.xml"
-
-          fetch() {
-            local url="$1"
-            echo "Trying: $url"
-            curl -L --fail --max-time 60 --connect-timeout 15 \
-              -H "User-Agent: Mozilla/5.0 (compatible; statistika-hasici-stc/1.0)" \
-              -H "Accept: application/rss+xml, application/xml, text/xml, */*" \
-              "$url" -o feed.xml
-          }
-
-          if fetch "$URL1"; then
-            echo "OK via URL1"
-          elif fetch "$URL2"; then
-            echo "OK via URL2"
-          elif fetch "$URL3"; then
-            echo "OK via URL3"
-          else
-            echo "All fetch attempts failed"
-            exit 1
-          fi
-
+          curl -L --fail --max-time 60 --connect-timeout 15 \
+            -H "User-Agent: Mozilla/5.0 (compatible; statistika-hasici-stc/1.0)" \
+            -H "Accept: application/rss+xml, application/xml, text/xml, */*" \
+            "https://white-glade-3f1c.martypetrzel.workers.dev" \
+            -o feed.xml
           echo "Downloaded feed.xml ($(wc -c < feed.xml) bytes)"
 
       - name: Push to Railway API
