@@ -10,7 +10,28 @@ function getTimeoutMs() {
   return Number.isFinite(v) && v > 0 ? v : 60000;
 }
 
+function isCfWorkerFeed(feedUrl) {
+  try {
+    const u = new URL(feedUrl);
+    return (
+      u.hostname.endsWith("statistikahasici.org") ||
+      u.hostname.endsWith("workers.dev")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function buildCandidates(feedUrl) {
+  // Cloudflare Worker feed: nepoužívat allorigins ani jina (jina dává text před XML)
+  if (isCfWorkerFeed(feedUrl)) {
+    return [
+      { url: feedUrl, mode: "fetch" },
+      { url: feedUrl, mode: "native" }
+    ];
+  }
+
+  // původní fallbacky pro jiné feedy
   return [
     { url: feedUrl, mode: "native" },
     {
@@ -32,7 +53,6 @@ function shouldUseInsecureTls(url) {
 
 function formatErr(e) {
   if (!e) return "unknown error";
-  // AggregateError často obsahuje .errors (pole)
   if (e instanceof AggregateError && Array.isArray(e.errors)) {
     const parts = e.errors.map((x) => {
       const code = x?.code ? `${x.code}` : "";
@@ -45,12 +65,35 @@ function formatErr(e) {
   return code + (e.message || String(e));
 }
 
+function sanitizeXml(text) {
+  if (typeof text !== "string") return text;
+
+  // BOM pryč
+  let s = text.replace(/^\uFEFF/, "");
+
+  // pokud je před XML nějaký text (jina, html, hláška), vezmi až od prvního "<"
+  const i = s.indexOf("<");
+  if (i > 0) s = s.slice(i);
+
+  return s;
+}
+
+function looksLikeXml(s) {
+  if (typeof s !== "string") return false;
+  const t = s.trimStart();
+  return t.startsWith("<");
+}
+
 async function fetchTextNative(url, { timeoutMs }) {
   const u = new URL(url);
   const isHttps = u.protocol === "https:";
   const lib = isHttps ? https : http;
 
   const insecure = isHttps && shouldUseInsecureTls(url);
+
+  // 🚑 vynutit IPv4 pro problematické hosty (Railway občas timeoutuje na IPv6)
+  const forceIPv4 =
+    u.hostname === "pkr.kr-stredocesky.cz" || u.hostname.endsWith("statistikahasici.org");
 
   const options = {
     method: "GET",
@@ -60,11 +103,8 @@ async function fetchTextNative(url, { timeoutMs }) {
       accept: "application/rss+xml, application/xml, text/xml, */*"
     },
 
-    // Jen pro tenhle host (rozbitý TLS řetězec/cert):
     ...(insecure ? { rejectUnauthorized: false } : {}),
-
-    // 🚑 Railway fix: vynutit IPv4 pro tenhle host (řeší AggregateError z dual-stacku)
-    ...(u.hostname === "pkr.kr-stredocesky.cz" ? { family: 4 } : {})
+    ...(forceIPv4 ? { family: 4 } : {})
   };
 
   return await new Promise((resolve, reject) => {
@@ -116,7 +156,8 @@ async function fetchTextViaFetch(url, { timeoutMs }) {
         "user-agent":
           "statistika-hasici-stc/1.0 (+https://github.com/martypetrzel-lab/statistika-hasici-stc)",
         accept: "application/rss+xml, application/xml, text/xml, */*"
-      }
+      },
+      redirect: "follow"
     });
 
     if (!r.ok) throw new Error(`Status code ${r.status}`);
@@ -145,6 +186,12 @@ export async function ingestOnce({ feedUrl }) {
         xml = await fetchTextNative(url, { timeoutMs });
       } else {
         xml = await fetchTextViaFetch(url, { timeoutMs });
+      }
+
+      xml = sanitizeXml(xml);
+
+      if (!looksLikeXml(xml)) {
+        throw new Error("Upstream did not return XML (no '<' found at start)");
       }
 
       usedUrl = url;
