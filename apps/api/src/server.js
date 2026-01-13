@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { ingestOnce } from "./ingest.js";
+import { ingestOnce, ingestXml } from "./ingest.js";
 import { initDb, getPlaces, getPlacesStats, getIncidents } from "./db.js";
 
 dotenv.config();
@@ -15,15 +15,27 @@ app.use(
     origin: process.env.CORS_ORIGIN || "*"
   })
 );
-app.use(express.json({ limit: "1mb" }));
+
+// nejdřív JSON obecně
+app.use(express.json({ limit: "5mb" }));
+
+// ✅ ale pro ingest dovolíme raw text (XML) – jen na této cestě
+app.use(
+  "/api/ingest",
+  express.text({
+    type: [
+      "application/xml",
+      "text/xml",
+      "application/rss+xml",
+      "text/plain"
+    ],
+    limit: "5mb"
+  })
+);
 
 const PORT = Number(process.env.PORT || 8787);
-
-// ✅ ber i RSS_URL (Cloudflare proxy), pokud existuje
 const FEED_URL =
-  process.env.RSS_URL ||
-  process.env.FEED_URL ||
-  "https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml";
+  process.env.FEED_URL || "https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -75,31 +87,32 @@ app.get("/api/stats/places", async (req, res) => {
   }
 });
 
-// Ingest endpoint
+// Ingest endpoint (umí: 1) poslané XML 2) JSON {xml} 3) fetch z feedUrl
 async function runIngest(req, res) {
-  const feedUrl =
-    (req.body && req.body.feedUrl) ||
-    (req.query && req.query.feedUrl) ||
-    FEED_URL;
-
-  // ✅ když dáš ?async=1, vrátí to odpověď hned a ingest doběhne na pozadí
-  const asyncMode =
-    String(req.query?.async || "0") === "1" || String(req.query?.async) === "true";
-
   try {
-    if (asyncMode) {
-      // fire-and-forget
-      ingestOnce({ feedUrl })
-        .then((r) => console.log(`[ingest] async ok fetched=${r.fetched} upserted=${r.upserted}`))
-        .catch((e) => console.error(`[ingest] async fail`, e?.message || e));
-
-      return res.status(202).json({ ok: true, started: true, feedUrl });
+    // 1) když přišlo raw XML (Content-Type: application/xml)
+    if (typeof req.body === "string" && req.body.trimStart().startsWith("<")) {
+      const result = await ingestXml({ xml: req.body });
+      return res.json({ ok: true, mode: "xml", ...result });
     }
 
+    // 2) když přišlo JSON { xml: "..." }
+    const bodyXml = req.body && typeof req.body === "object" ? req.body.xml : null;
+    if (typeof bodyXml === "string" && bodyXml.trimStart().startsWith("<")) {
+      const result = await ingestXml({ xml: bodyXml });
+      return res.json({ ok: true, mode: "xml", ...result });
+    }
+
+    // 3) fallback: stáhnout feedUrl
+    const feedUrl =
+      (req.body && req.body.feedUrl) ||
+      (req.query && req.query.feedUrl) ||
+      FEED_URL;
+
     const result = await ingestOnce({ feedUrl });
-    return res.json({ ok: true, ...result });
+    return res.json({ ok: true, mode: "fetch", feedUrl, ...result });
   } catch (e) {
-    return res.status(500).json({
+    res.status(500).json({
       ok: false,
       error: String(e?.message || e),
       feed: FEED_URL
@@ -120,7 +133,7 @@ app.listen(PORT, () => {
   console.log(`[api] feed: ${FEED_URL}`);
 });
 
-// AUTO INGEST
+// AUTO INGEST (doporučuji na Railway vypnout env AUTO_INGEST=0)
 const AUTO_INGEST = String(process.env.AUTO_INGEST || "1") !== "0";
 const EVERY_SECONDS = Number(process.env.INGEST_EVERY_SECONDS || 300);
 
