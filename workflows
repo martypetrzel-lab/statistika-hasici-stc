@@ -1,0 +1,33 @@
+name: RSS ingest (push to Railway)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"  # každých 10 minut
+  workflow_dispatch: {}
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Fetch RSS feed
+        run: |
+          set -e
+          curl -L --fail --max-time 60 \
+            -H "User-Agent: statistika-hasici-stc/1.0" \
+            "https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml" \
+            -o feed.xml
+          echo "Downloaded feed.xml ($(wc -c < feed.xml) bytes)"
+
+      - name: Push to Railway API
+        env:
+          API_URL: ${{ secrets.INGEST_API_URL }}
+          TOKEN: ${{ secrets.INGEST_TOKEN }}
+        run: |
+          set -e
+          curl -L --fail --max-time 60 \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/xml" \
+            --data-binary @feed.xml \
+            "${API_URL}/api/ingest/raw"
