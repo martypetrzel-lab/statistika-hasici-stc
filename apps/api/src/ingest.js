@@ -6,8 +6,8 @@ import { parseRss } from "./rss.js";
 import { upsertIncidents, countGeocodedAttempts } from "./db.js";
 
 function getTimeoutMs() {
-  const v = Number(process.env.INGEST_FETCH_TIMEOUT_MS || 60000);
-  return Number.isFinite(v) && v > 0 ? v : 60000;
+  const v = Number(process.env.INGEST_FETCH_TIMEOUT_MS || 120000);
+  return Number.isFinite(v) && v > 0 ? v : 120000;
 }
 
 function isCfWorkerFeed(feedUrl) {
@@ -23,15 +23,14 @@ function isCfWorkerFeed(feedUrl) {
 }
 
 function buildCandidates(feedUrl) {
-  // Cloudflare Worker feed: nepoužívat allorigins ani jina (jina dává text před XML)
+  // ✅ CF feed: preferuj native (umíme family:4), fetch až jako fallback
   if (isCfWorkerFeed(feedUrl)) {
     return [
-      { url: feedUrl, mode: "fetch" },
-      { url: feedUrl, mode: "native" }
+      { url: feedUrl, mode: "native" },
+      { url: feedUrl, mode: "fetch" }
     ];
   }
 
-  // původní fallbacky pro jiné feedy
   return [
     { url: feedUrl, mode: "native" },
     {
@@ -67,21 +66,15 @@ function formatErr(e) {
 
 function sanitizeXml(text) {
   if (typeof text !== "string") return text;
-
-  // BOM pryč
   let s = text.replace(/^\uFEFF/, "");
-
-  // pokud je před XML nějaký text (jina, html, hláška), vezmi až od prvního "<"
   const i = s.indexOf("<");
   if (i > 0) s = s.slice(i);
-
   return s;
 }
 
 function looksLikeXml(s) {
   if (typeof s !== "string") return false;
-  const t = s.trimStart();
-  return t.startsWith("<");
+  return s.trimStart().startsWith("<");
 }
 
 async function fetchTextNative(url, { timeoutMs }) {
@@ -91,7 +84,7 @@ async function fetchTextNative(url, { timeoutMs }) {
 
   const insecure = isHttps && shouldUseInsecureTls(url);
 
-  // 🚑 vynutit IPv4 pro problematické hosty (Railway občas timeoutuje na IPv6)
+  // ✅ vynutit IPv4 pro PKR + pro naši CF doménu (Railway/IPv6 zlobí)
   const forceIPv4 =
     u.hostname === "pkr.kr-stredocesky.cz" || u.hostname.endsWith("statistikahasici.org");
 
@@ -102,7 +95,6 @@ async function fetchTextNative(url, { timeoutMs }) {
         "statistika-hasici-stc/1.0 (+https://github.com/martypetrzel-lab/statistika-hasici-stc)",
       accept: "application/rss+xml, application/xml, text/xml, */*"
     },
-
     ...(insecure ? { rejectUnauthorized: false } : {}),
     ...(forceIPv4 ? { family: 4 } : {})
   };
