@@ -11,33 +11,23 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Download RSS (prefer Cloudflare Worker, fallback direct)
+      - name: Download RSS via custom domain (Cloudflare Worker)
         run: |
           set -e
 
-          WORKER_URL="https://white-glade-3f1c.martypetrzel.workers.dev/"
-          DIRECT_URL="https://pkr.kr-stredocesky.cz/pkr/zasahy-jpo/feed.xml"
+          echo "Fetching RSS…"
 
-          fetch() {
-            local url="$1"
-            echo "Fetching: $url"
-            curl -L --fail \
-              --max-time 60 --connect-timeout 15 \
-              --retry 5 --retry-delay 3 --retry-all-errors \
-              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36" \
-              -H "Accept: application/xml,text/xml,application/rss+xml,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8" \
-              -H "Accept-Language: cs,en;q=0.8" \
-              -H "Cache-Control: no-cache" \
-              -H "Pragma: no-cache" \
-              --compressed \
-              "$url" -o feed.xml
-          }
-
-          # 1) primárně přes Worker
-          if ! fetch "$WORKER_URL"; then
-            echo "Worker failed, trying direct RSS…"
-            fetch "$DIRECT_URL"
-          fi
+          curl -L \
+            --fail \
+            --max-time 60 \
+            --connect-timeout 15 \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            -H "User-Agent: Mozilla/5.0 (compatible; statistika-hasici-stc/1.0)" \
+            -H "Accept: application/xml,text/xml,application/rss+xml,*/*" \
+            "https://rss.statistikahasici.org/" \
+            -o feed.xml
 
           test -s feed.xml
           echo "RSS downloaded. Size: $(wc -c < feed.xml) bytes"
@@ -49,11 +39,15 @@ jobs:
         run: |
           set -e
 
-          echo "Pushing to Railway: ${INGEST_API_URL}/api/ingest/raw"
+          echo "Pushing RSS to Railway…"
 
-          curl -L --fail \
-            --max-time 60 --connect-timeout 15 \
-            --retry 5 --retry-delay 5 --retry-all-errors \
+          curl -L \
+            --fail \
+            --max-time 60 \
+            --connect-timeout 15 \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
             -H "Authorization: Bearer ${INGEST_TOKEN}" \
             -H "Content-Type: application/xml; charset=utf-8" \
             --data-binary @feed.xml \
