@@ -1,14 +1,13 @@
-name: RSS ingest (push to API)
+name: Push RSS to Railway API
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *" # každých 5 minut
 
 jobs:
   push:
     runs-on: ubuntu-latest
-
     steps:
       - name: Push RSS to Railway API (robust)
         env:
@@ -27,21 +26,19 @@ jobs:
             exit 1
           fi
 
-          echo "INGEST_API_URL=$INGEST_API_URL"
-          echo "RSS_URL=$RSS_URL"
-
           echo "Testing API reachability..."
-          curl -4 -v --show-error --fail --connect-timeout 20 --max-time 60 \
-            "$INGEST_API_URL/health" || true
+          curl -4 --show-error --fail --connect-timeout 20 --max-time 60 "$INGEST_API_URL/health" || true
 
-          echo "Pushing RSS..."
+          echo "Pushing ingest trigger..."
+          # POZOR: endpoint je /api/ingest (ne /ingest)
           curl -4 --show-error --fail-with-body \
             --connect-timeout 20 \
-            --max-time 180 \
+            --max-time 120 \
             --retry 10 \
             --retry-all-errors \
             --retry-delay 5 \
-            -X POST \
             -H "Content-Type: application/json" \
-            -d "{\"feedUrl\":\"$RSS_URL\"}" \
-            "$INGEST_API_URL/ingest"
+            -X POST "$INGEST_API_URL/api/ingest" \
+            --data "{\"feedUrl\":\"$RSS_URL\"}"
+
+          echo "Done."
