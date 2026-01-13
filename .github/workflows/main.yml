@@ -2,7 +2,8 @@ name: RSS ingest (push to Railway)
 
 on:
   schedule:
-    - cron: "*/10 * * * *" # každých 10 minut
+    # každých 10 minut
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -11,24 +12,42 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Fetch RSS feed (via Cloudflare Worker)
+      - name: Download RSS via Cloudflare Worker
         run: |
           set -e
-          curl -L --fail --max-time 60 --connect-timeout 15 \
-            -H "User-Agent: Mozilla/5.0 (compatible; statistika-hasici-stc/1.0)" \
-            -H "Accept: application/rss+xml, application/xml, text/xml, */*" \
-            "https://white-glade-3f1c.martypetrzel.workers.dev" \
-            -o feed.xml
-          echo "Downloaded feed.xml ($(wc -c < feed.xml) bytes)"
 
-      - name: Push to Railway API
+          echo "Fetching RSS from Cloudflare Worker…"
+
+          curl -L \
+            --fail \
+            --max-time 60 \
+            --connect-timeout 15 \
+            -H "User-Agent: statistika-hasici-stc/1.0 (+https://github.com)" \
+            -H "Accept: application/xml,text/xml,application/rss+xml,*/*" \
+            "https://white-glade-3f1c.martypetrzel.workers.dev/" \
+            -o feed.xml
+
+          echo "RSS downloaded:"
+          echo "----------------"
+          head -n 20 feed.xml
+          echo "----------------"
+          echo "Size: $(wc -c < feed.xml) bytes"
+
+      - name: Push RSS to Railway API
         env:
-          API_URL: ${{ secrets.INGEST_API_URL }}
-          TOKEN: ${{ secrets.INGEST_TOKEN }}
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
         run: |
           set -e
-          curl -L --fail --max-time 60 \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H "Content-Type: application/xml" \
+
+          echo "Pushing RSS to Railway…"
+
+          curl -L \
+            --fail \
+            --max-time 60 \
+            -H "Authorization: Bearer ${INGEST_TOKEN}" \
+            -H "Content-Type: application/xml; charset=utf-8" \
             --data-binary @feed.xml \
-            "${API_URL}/api/ingest/raw"
+            "${INGEST_API_URL}/api/ingest/raw"
+
+          echo "Push OK"
